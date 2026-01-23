@@ -19,6 +19,16 @@ function createWebSocketServer(httpServer) {
           const { userId, sessionId, position } = data;
           players.set(socket, { userId, sessionId, position, lastUpdate: Date.now() });
           
+          // Update last_seen_at in DB
+          try {
+            await supabase
+              .from('user_profiles')
+              .update({ last_seen_at: new Date().toISOString() })
+              .eq('user_id', userId);
+          } catch (err) {
+            console.error('Error updating last_seen_at:', err);
+          }
+          
           // Send existing players to the new player
           const otherPlayers = [];
           for (const [s, p] of players.entries()) {
@@ -55,6 +65,14 @@ function createWebSocketServer(httpServer) {
                 sessionId: player.sessionId,
                 position: data.position
               }, socket);
+            }
+
+            // Update last_seen_at if it's been more than 1 minute since last update
+            if (Date.now() - player.lastUpdate > 60000) {
+              await supabase
+                .from('user_profiles')
+                .update({ last_seen_at: new Date().toISOString() })
+                .eq('user_id', player.userId);
             }
           }
         }
