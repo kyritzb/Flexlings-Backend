@@ -10,6 +10,8 @@ const corsMiddleware = cors({
     /\.trycloudflare\.com$/,
     /^https:\/\/.*\.expo\.dev$/,
     /^https:\/\/.*\.exp\.direct$/,
+    'https://www.flexling.xyz',
+    'https://flexlings.vercel.app',
   ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
