@@ -18,7 +18,7 @@ function createWebSocketServer(httpServer) {
         if (data.type === 'join') {
           const { userId, sessionId, position, isSpectator } = data;
           
-          let username = 'Player';
+          let username = data.username || 'Player';
           if (userId) {
             try {
               const { data: profile } = await supabase
@@ -26,7 +26,7 @@ function createWebSocketServer(httpServer) {
                 .select('username')
                 .eq('user_id', userId)
                 .single();
-              if (profile && profile.username) {
+              if (profile?.username) {
                 username = profile.username;
               }
             } catch (err) {
