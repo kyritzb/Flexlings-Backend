@@ -96,6 +96,14 @@ function createWebSocketServer(httpServer) {
           }
         }
 
+        else if (data.type === 'leave') {
+          const player = players.get(socket);
+          if (player) {
+            console.log(`👋 ${player.isSpectator ? 'Spectator' : 'User'} ${player.userId} sent explicit leave`);
+            handlePlayerLeave(socket, player);
+          }
+        }
+
         else if (data.type === 'saveLocation') {
           // Explicit save request
           const { userId, position } = data;
@@ -119,35 +127,39 @@ function createWebSocketServer(httpServer) {
     socket.on('close', async () => {
       const player = players.get(socket);
       if (player) {
-        console.log(`${player.isSpectator ? 'Spectator' : 'User'} ${player.userId} left the game`);
-        
-        if (!player.isSpectator) {
-          // Save final location to DB only for actual players
-          try {
-            await supabase
-              .from('game_locations')
-              .upsert({ 
-                user_id: player.userId, 
-                x: player.position.x, 
-                y: player.position.y,
-                updated_at: new Date().toISOString()
-              }, { onConflict: 'user_id' });
-          } catch (dbError) {
-            console.error('Error saving final location:', dbError);
-          }
-
-          broadcast({
-            type: 'playerLeft',
-            userId: player.userId,
-            sessionId: player.sessionId
-          }, socket);
-        }
-        
-        players.delete(socket);
-        broadcastOnlineCount();
+        await handlePlayerLeave(socket, player);
       }
     });
   });
+
+  async function handlePlayerLeave(socket, player) {
+    console.log(`${player.isSpectator ? 'Spectator' : 'User'} ${player.userId} left the game`);
+    
+    if (!player.isSpectator) {
+      // Save final location to DB only for actual players
+      try {
+        await supabase
+          .from('game_locations')
+          .upsert({ 
+            user_id: player.userId, 
+            x: player.position.x, 
+            y: player.position.y,
+            updated_at: new Date().toISOString()
+          }, { onConflict: 'user_id' });
+      } catch (dbError) {
+        console.error('Error saving final location:', dbError);
+      }
+
+      broadcast({
+        type: 'playerLeft',
+        userId: player.userId,
+        sessionId: player.sessionId
+      }, socket);
+    }
+    
+    players.delete(socket);
+    broadcastOnlineCount();
+  }
 
   function broadcastOnlineCount() {
     const count = Array.from(players.values()).filter(p => !p.isSpectator).length;
