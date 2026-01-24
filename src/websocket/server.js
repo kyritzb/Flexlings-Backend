@@ -17,7 +17,24 @@ function createWebSocketServer(httpServer) {
 
         if (data.type === 'join') {
           const { userId, sessionId, position, isSpectator } = data;
-          players.set(socket, { userId, sessionId, position, lastUpdate: Date.now(), isSpectator: !!isSpectator });
+          
+          let username = 'Player';
+          if (userId) {
+            try {
+              const { data: profile } = await supabase
+                .from('user_profiles')
+                .select('username')
+                .eq('user_id', userId)
+                .single();
+              if (profile && profile.username) {
+                username = profile.username;
+              }
+            } catch (err) {
+              console.error('Error fetching username:', err);
+            }
+          }
+
+          players.set(socket, { userId, sessionId, position, username, lastUpdate: Date.now(), isSpectator: !!isSpectator });
           
           if (!isSpectator) {
             // Update last_seen_at in DB only for actual players
@@ -35,11 +52,16 @@ function createWebSocketServer(httpServer) {
           const otherPlayers = [];
           for (const [s, p] of players.entries()) {
             if (s !== socket && !p.isSpectator) {
-              otherPlayers.push({ userId: p.userId, sessionId: p.sessionId, position: p.position });
+              otherPlayers.push({ 
+                userId: p.userId, 
+                sessionId: p.sessionId, 
+                position: p.position,
+                username: p.username 
+              });
             }
           }
           
-          console.log(`📥 ${isSpectator ? 'Spectator' : 'User'} ${userId} (Session: ${sessionId}) joining. Sending ${otherPlayers.length} existing players`);
+          console.log(`📥 ${isSpectator ? 'Spectator' : 'User'} ${userId} (Session: ${sessionId}) joining as ${username}. Sending ${otherPlayers.length} existing players`);
           socket.send(JSON.stringify({ type: 'playersList', players: otherPlayers }));
 
           if (!isSpectator) {
@@ -47,11 +69,14 @@ function createWebSocketServer(httpServer) {
             console.log(`📤 Broadcasting playerJoined to ${players.size - 1} other players`);
             broadcast({
               type: 'playerJoined',
-              player: { userId, sessionId, position }
+              player: { userId, sessionId, position, username }
             }, socket);
           }
 
-          console.log(`✅ ${isSpectator ? 'Spectator' : 'User'} ${userId} joined. Total connections: ${players.size}`);
+          // Broadcast online count to everyone
+          broadcastOnlineCount();
+
+          console.log(`✅ ${isSpectator ? 'Spectator' : 'User'} ${username} joined. Total connections: ${players.size}`);
         } 
         
         else if (data.type === 'updatePosition') {
@@ -65,7 +90,8 @@ function createWebSocketServer(httpServer) {
               type: 'playerMoved',
               userId: player.userId,
               sessionId: player.sessionId,
-              position: data.position
+              position: data.position,
+              username: player.username
             }, socket);
           }
         }
@@ -118,9 +144,16 @@ function createWebSocketServer(httpServer) {
         }
         
         players.delete(socket);
+        broadcastOnlineCount();
       }
     });
   });
+
+  function broadcastOnlineCount() {
+    const count = Array.from(players.values()).filter(p => !p.isSpectator).length;
+    console.log(`📢 Broadcasting online count: ${count} (Total connections: ${players.size})`);
+    broadcast({ type: 'onlineCount', count });
+  }
 
   function broadcast(data, excludeSocket = null) {
     const message = JSON.stringify(data);
