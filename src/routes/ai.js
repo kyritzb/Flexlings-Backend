@@ -37,6 +37,7 @@ router.post(
     try {
       const { swolegotchiName } = req.body;
       const inspirationImage = req.file;
+      console.log(`🎨 [${new Date().toISOString()}] Starting generation for "${swolegotchiName}" (Inspiration image: ${!!inspirationImage})`);
       if (!swolegotchiName || !swolegotchiName.trim())
         return res.status(400).json({ error: 'Flexling name is required' });
       if (!process.env.OPENAI_API_KEY)
@@ -93,6 +94,7 @@ router.post(
       const generatedImageBase64 = response.data[0].b64_json;
       const generatedImageUrl = `data:image/png;base64,${generatedImageBase64}`;
 
+      console.log(`✅ [${new Date().toISOString()}] Flexling "${swolegotchiName}" generated successfully!`);
       res.json({
         success: true,
         imageUrl: generatedImageUrl,
@@ -100,6 +102,7 @@ router.post(
         message: 'Flexling generated successfully!',
       });
     } catch (error) {
+      console.error(`❌ [${new Date().toISOString()}] Generation Error for "${req.body.swolegotchiName}":`, error);
       let statusCode = 500;
       let errorMessage = 'Failed to generate flexling';
       const msg = error.message || '';

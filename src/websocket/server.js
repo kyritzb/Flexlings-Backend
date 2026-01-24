@@ -16,64 +16,57 @@ function createWebSocketServer(httpServer) {
         const data = JSON.parse(message.toString());
 
         if (data.type === 'join') {
-          const { userId, sessionId, position } = data;
-          players.set(socket, { userId, sessionId, position, lastUpdate: Date.now() });
+          const { userId, sessionId, position, isSpectator } = data;
+          players.set(socket, { userId, sessionId, position, lastUpdate: Date.now(), isSpectator: !!isSpectator });
           
-          // Update last_seen_at in DB
-          try {
-            await supabase
-              .from('user_profiles')
-              .update({ last_seen_at: new Date().toISOString() })
-              .eq('user_id', userId);
-          } catch (err) {
-            console.error('Error updating last_seen_at:', err);
+          if (!isSpectator) {
+            // Update last_seen_at in DB only for actual players
+            try {
+              await supabase
+                .from('user_profiles')
+                .update({ last_seen_at: new Date().toISOString() })
+                .eq('user_id', userId);
+            } catch (err) {
+              console.error('Error updating last_seen_at:', err);
+            }
           }
           
-          // Send existing players to the new player
+          // Send existing players to the new joiner (both players and spectators see others)
           const otherPlayers = [];
           for (const [s, p] of players.entries()) {
-            if (s !== socket) {
+            if (s !== socket && !p.isSpectator) {
               otherPlayers.push({ userId: p.userId, sessionId: p.sessionId, position: p.position });
             }
           }
           
-          console.log(`📥 User ${userId} (Session: ${sessionId}) joining. Sending ${otherPlayers.length} existing players`);
+          console.log(`📥 ${isSpectator ? 'Spectator' : 'User'} ${userId} (Session: ${sessionId}) joining. Sending ${otherPlayers.length} existing players`);
           socket.send(JSON.stringify({ type: 'playersList', players: otherPlayers }));
 
-          // Notify others about the new player
-          console.log(`📤 Broadcasting playerJoined to ${players.size - 1} other players`);
-          broadcast({
-            type: 'playerJoined',
-            player: { userId, sessionId, position }
-          }, socket);
+          if (!isSpectator) {
+            // Notify others about the new player only if they aren't a spectator
+            console.log(`📤 Broadcasting playerJoined to ${players.size - 1} other players`);
+            broadcast({
+              type: 'playerJoined',
+              player: { userId, sessionId, position }
+            }, socket);
+          }
 
-          console.log(`✅ User ${userId} (Session: ${sessionId}) joined. Total players: ${players.size}`);
+          console.log(`✅ ${isSpectator ? 'Spectator' : 'User'} ${userId} joined. Total connections: ${players.size}`);
         } 
         
         else if (data.type === 'updatePosition') {
           const player = players.get(socket);
-          if (player) {
+          if (player && !player.isSpectator) {
             player.position = data.position;
             player.lastUpdate = Date.now();
 
-            // Broadcast to all other players (only if there are others)
-            const otherCount = players.size - 1;
-            if (otherCount > 0) {
-              broadcast({
-                type: 'playerMoved',
-                userId: player.userId,
-                sessionId: player.sessionId,
-                position: data.position
-              }, socket);
-            }
-
-            // Update last_seen_at if it's been more than 1 minute since last update
-            if (Date.now() - player.lastUpdate > 60000) {
-              await supabase
-                .from('user_profiles')
-                .update({ last_seen_at: new Date().toISOString() })
-                .eq('user_id', player.userId);
-            }
+            // Broadcast to all other players (spectators also need to see movement)
+            broadcast({
+              type: 'playerMoved',
+              userId: player.userId,
+              sessionId: player.sessionId,
+              position: data.position
+            }, socket);
           }
         }
 
@@ -100,27 +93,30 @@ function createWebSocketServer(httpServer) {
     socket.on('close', async () => {
       const player = players.get(socket);
       if (player) {
-        console.log(`User ${player.userId} (Session: ${player.sessionId}) left the game`);
+        console.log(`${player.isSpectator ? 'Spectator' : 'User'} ${player.userId} left the game`);
         
-        // Save final location to DB
-        try {
-          await supabase
-            .from('game_locations')
-            .upsert({ 
-              user_id: player.userId, 
-              x: player.position.x, 
-              y: player.position.y,
-              updated_at: new Date().toISOString()
-            }, { onConflict: 'user_id' });
-        } catch (dbError) {
-          console.error('Error saving final location:', dbError);
-        }
+        if (!player.isSpectator) {
+          // Save final location to DB only for actual players
+          try {
+            await supabase
+              .from('game_locations')
+              .upsert({ 
+                user_id: player.userId, 
+                x: player.position.x, 
+                y: player.position.y,
+                updated_at: new Date().toISOString()
+              }, { onConflict: 'user_id' });
+          } catch (dbError) {
+            console.error('Error saving final location:', dbError);
+          }
 
-        broadcast({
-          type: 'playerLeft',
-          userId: player.userId,
-          sessionId: player.sessionId
-        }, socket);
+          broadcast({
+            type: 'playerLeft',
+            userId: player.userId,
+            sessionId: player.sessionId
+          }, socket);
+        }
+        
         players.delete(socket);
       }
     });
