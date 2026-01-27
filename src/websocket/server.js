@@ -5,8 +5,15 @@ function createWebSocketServer(httpServer) {
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
   // Keep track of all connected players
-  // Key: socket, Value: { userId, sessionId, position, lastUpdate }
+  // Key: socket, Value: { userId, sessionId, position, lastUpdate, lastPositionUpdate }
   const players = new Map();
+  
+  // Map-based player indexing for O(1) map filtering
+  // Key: mapId, Value: Set of sockets
+  const playersByMap = new Map();
+  
+  // Rate limiting configuration
+  const POSITION_UPDATE_INTERVAL = 66; // ~15 updates/second (1000ms / 15)
 
   wss.on('connection', (socket, req) => {
     console.log('New WS connection');
@@ -16,7 +23,7 @@ function createWebSocketServer(httpServer) {
         const data = JSON.parse(message.toString());
 
         if (data.type === 'join') {
-          const { userId, sessionId, position, isSpectator, sprite, mapId } = data;
+          const { userId, sessionId, position, isSpectator, sprite, mapId, deviceInfo } = data;
           
           let username = data.username || 'Player';
           if (userId) {
@@ -34,16 +41,141 @@ function createWebSocketServer(httpServer) {
             }
           }
 
-          players.set(socket, { 
+          // Check for existing session (only for actual players, not spectators)
+          if (!isSpectator && userId) {
+            try {
+              console.log(`🔍 Checking for existing session for user ${userId} with sessionId ${sessionId}`);
+              
+              // FIRST: Check if this exact userId+sessionId combo is already connected in memory
+              // This handles duplicate connections from the same tab (React strict mode, reconnections, page refresh, etc.)
+              for (const [existingSocket, existingPlayer] of players.entries()) {
+                if (existingSocket !== socket && 
+                    existingPlayer.userId === userId && 
+                    existingPlayer.sessionId === sessionId) {
+                  console.log(`⚠️ Duplicate connection detected: Same userId ${userId} and sessionId ${sessionId} already connected. Removing old socket immediately.`);
+                  
+                  // Immediately clean up the old socket from our data structures
+                  removePlayerFromMap(existingSocket, existingPlayer.mapId);
+                  players.delete(existingSocket);
+                  
+                  // Broadcast that the old player left
+                  broadcastToMap(existingPlayer.mapId, {
+                    type: 'playerLeft',
+                    userId: existingPlayer.userId,
+                    sessionId: existingPlayer.sessionId
+                  }, existingSocket);
+                  
+                  // Then close the socket
+                  existingSocket.close(1008, 'Duplicate connection');
+                  
+                  console.log(`✅ Cleaned up duplicate socket for userId ${userId} sessionId ${sessionId}`);
+                  // Don't break - there might be multiple duplicates
+                }
+              }
+              
+              // SECOND: Check database for different sessionId (login from another device)
+              const { data: existingSession, error: selectError } = await supabase
+                .from('game_sessions')
+                .select('session_id')
+                .eq('user_id', userId)
+                .single();
+
+              if (selectError && selectError.code !== 'PGRST116') {
+                // PGRST116 = no rows returned, which is fine
+                console.error('Error checking for existing session:', selectError);
+                throw selectError;
+              }
+
+              if (existingSession && existingSession.session_id !== sessionId) {
+                console.log(`🚨 User ${userId} already has an active session. Kicking out old session: ${existingSession.session_id}`);
+                
+                // Find and disconnect the old session (different device/tab)
+                for (const [oldSocket, oldPlayer] of players.entries()) {
+                  if (oldPlayer.userId === userId && oldPlayer.sessionId === existingSession.session_id) {
+                    // Notify the old session that they've been kicked
+                    try {
+                      oldSocket.send(JSON.stringify({ 
+                        type: 'sessionKicked', 
+                        message: 'You have been logged in from another device' 
+                      }));
+                      console.log(`✅ Sent kick message to old session ${existingSession.session_id}`);
+                    } catch (err) {
+                      console.error('Error sending kick message:', err);
+                    }
+                    
+                    // Immediately clean up the old socket
+                    removePlayerFromMap(oldSocket, oldPlayer.mapId);
+                    players.delete(oldSocket);
+                    
+                    // Broadcast that the old player left
+                    broadcastToMap(oldPlayer.mapId, {
+                      type: 'playerLeft',
+                      userId: oldPlayer.userId,
+                      sessionId: oldPlayer.sessionId
+                    }, oldSocket);
+                    
+                    // Close the old socket connection
+                    oldSocket.close(1008, 'Session replaced by new login');
+                    console.log(`✅ Closed old socket for session ${existingSession.session_id}`);
+                    // Don't break - close all sockets with that session
+                  }
+                }
+
+                // Delete the old session from database
+                const { error: deleteError } = await supabase
+                  .from('game_sessions')
+                  .delete()
+                  .eq('user_id', userId);
+                
+                if (deleteError) {
+                  console.error('Error deleting old session:', deleteError);
+                }
+              } else {
+                console.log(`✅ No existing session found for user ${userId}, or same session reconnecting`);
+              }
+
+              // Create new session record
+              const { error: upsertError } = await supabase
+                .from('game_sessions')
+                .upsert({
+                  user_id: userId,
+                  session_id: sessionId,
+                  connected_at: new Date().toISOString(),
+                  last_heartbeat: new Date().toISOString(),
+                  device_info: deviceInfo || null
+                }, { onConflict: 'user_id' });
+
+              if (upsertError) {
+                console.error('Error creating session record:', upsertError);
+                throw upsertError;
+              }
+              
+              console.log(`✅ Created session record for user ${userId} with sessionId ${sessionId}`);
+
+            } catch (err) {
+              console.error('❌ Error managing game session:', err);
+              console.error('Full error details:', JSON.stringify(err, null, 2));
+            }
+          }
+
+          const playerData = { 
             userId, 
             sessionId, 
             position, 
             username, 
             sprite, 
             mapId: mapId || null,
-            lastUpdate: Date.now(), 
+            lastUpdate: Date.now(),
+            lastPositionUpdate: 0, // For rate limiting
             isSpectator: !!isSpectator 
-          });
+          };
+          
+          players.set(socket, playerData);
+          
+          // Add player to map index (if not a spectator)
+          if (!isSpectator) {
+            addPlayerToMap(socket, mapId || null);
+          }
           
           if (!isSpectator) {
             // Update last_seen_at in DB only for actual players
@@ -93,10 +225,18 @@ function createWebSocketServer(httpServer) {
         else if (data.type === 'updatePosition') {
           const player = players.get(socket);
           if (player && !player.isSpectator) {
+            const now = Date.now();
+            
+            // Server-side rate limiting: max 15 updates/second per player
+            if (now - player.lastPositionUpdate < POSITION_UPDATE_INTERVAL) {
+              return; // Ignore update, too soon
+            }
+            
             player.position = data.position;
-            player.lastUpdate = Date.now();
+            player.lastUpdate = now;
+            player.lastPositionUpdate = now;
 
-            // Broadcast only to players on the SAME map
+            // Broadcast only to players on the SAME map with timestamp for interpolation
             broadcastToMap(player.mapId, {
               type: 'playerMoved',
               userId: player.userId,
@@ -104,7 +244,8 @@ function createWebSocketServer(httpServer) {
               position: data.position,
               username: player.username,
               sprite: player.sprite,
-              mapId: player.mapId
+              mapId: player.mapId,
+              timestamp: now
             }, socket);
           }
         }
@@ -123,18 +264,24 @@ function createWebSocketServer(httpServer) {
 
             console.log(`🌍 Player ${player.username} changing map: ${oldMapId} -> ${newMapId}`);
 
-            // 1. Notify players on the OLD map that this player left
+            // 1. Remove player from old map index
+            removePlayerFromMap(socket, oldMapId);
+
+            // 2. Notify players on the OLD map that this player left
             broadcastToMap(oldMapId, {
               type: 'playerLeft',
               userId: player.userId,
               sessionId: player.sessionId
             }, socket);
 
-            // 2. Update player state
+            // 3. Update player state
             player.mapId = newMapId;
             player.position = newPosition;
+            
+            // 4. Add player to new map index
+            addPlayerToMap(socket, newMapId);
 
-            // 3. Notify players on the NEW map that this player joined
+            // 5. Notify players on the NEW map that this player joined
             broadcastToMap(newMapId, {
               type: 'playerJoined',
               player: { 
@@ -147,7 +294,7 @@ function createWebSocketServer(httpServer) {
               }
             }, socket);
 
-            // 4. Send the NEW map's player list to the player
+            // 6. Send the NEW map's player list to the player
             const otherPlayers = [];
             for (const [s, p] of players.entries()) {
               if (s !== socket && !p.isSpectator && p.mapId === newMapId) {
@@ -188,6 +335,22 @@ function createWebSocketServer(httpServer) {
             }, { onConflict: 'user_id' });
         }
 
+        else if (data.type === 'heartbeat') {
+          // Update heartbeat in database
+          const player = players.get(socket);
+          if (player && !player.isSpectator && player.userId) {
+            try {
+              await supabase
+                .from('game_sessions')
+                .update({ last_heartbeat: new Date().toISOString() })
+                .eq('user_id', player.userId)
+                .eq('session_id', player.sessionId);
+            } catch (err) {
+              console.error('Error updating heartbeat:', err);
+            }
+          }
+        }
+
       } catch (error) {
         console.error('WS Error:', error);
         socket.send(JSON.stringify({ type: 'error', message: error.message }));
@@ -206,6 +369,9 @@ function createWebSocketServer(httpServer) {
     console.log(`${player.isSpectator ? 'Spectator' : 'User'} ${player.userId} left the game`);
     
     if (!player.isSpectator) {
+      // Remove player from map index
+      removePlayerFromMap(socket, player.mapId);
+      
       // Save final location to DB only for actual players
       try {
         await supabase
@@ -221,6 +387,17 @@ function createWebSocketServer(httpServer) {
         console.error('Error saving final location:', dbError);
       }
 
+      // Remove game session
+      try {
+        await supabase
+          .from('game_sessions')
+          .delete()
+          .eq('user_id', player.userId)
+          .eq('session_id', player.sessionId);
+      } catch (dbError) {
+        console.error('Error removing game session:', dbError);
+      }
+
       broadcastToMap(player.mapId, {
         type: 'playerLeft',
         userId: player.userId,
@@ -232,6 +409,27 @@ function createWebSocketServer(httpServer) {
     broadcastOnlineCount();
   }
 
+  // Helper functions for map-based player indexing
+  function addPlayerToMap(socket, mapId) {
+    if (!playersByMap.has(mapId)) {
+      playersByMap.set(mapId, new Set());
+    }
+    playersByMap.get(mapId).add(socket);
+    console.log(`📍 Added player to map ${mapId}. Map now has ${playersByMap.get(mapId).size} players`);
+  }
+
+  function removePlayerFromMap(socket, mapId) {
+    const mapPlayers = playersByMap.get(mapId);
+    if (mapPlayers) {
+      mapPlayers.delete(socket);
+      console.log(`📍 Removed player from map ${mapId}. Map now has ${mapPlayers.size} players`);
+      if (mapPlayers.size === 0) {
+        playersByMap.delete(mapId);
+        console.log(`📍 Map ${mapId} is now empty, removed from index`);
+      }
+    }
+  }
+
   function broadcastOnlineCount() {
     const count = Array.from(players.values()).filter(p => !p.isSpectator).length;
     console.log(`📢 Broadcasting online count: ${count} (Total connections: ${players.size})`);
@@ -240,9 +438,15 @@ function createWebSocketServer(httpServer) {
 
   function broadcastToMap(mapId, data, excludeSocket = null) {
     const message = JSON.stringify(data);
-    wss.clients.forEach((client) => {
-      const player = players.get(client);
-      if (client.readyState === 1 && client !== excludeSocket && player && player.mapId === mapId) {
+    const mapPlayers = playersByMap.get(mapId);
+    
+    if (!mapPlayers) {
+      return; // No players on this map
+    }
+    
+    // O(1) lookup instead of O(n) iteration through all clients
+    mapPlayers.forEach((client) => {
+      if (client.readyState === 1 && client !== excludeSocket) {
         client.send(message);
       }
     });
