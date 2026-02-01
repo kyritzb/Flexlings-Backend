@@ -14,6 +14,7 @@ const env = {
     webhookSecret: process.env.TERRA_WEBHOOK_SECRET,
   },
   openaiApiKey: process.env.OPENAI_API_KEY,
+  geminiApiKey: process.env.GEMINI_API_KEY,
 };
 
 module.exports = { env };

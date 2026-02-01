@@ -1,6 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const { openai } = require('../services/openai');
+const { generateGeminiImage } = require('../services/gemini');
 
 const router = express.Router();
 
@@ -35,24 +36,36 @@ router.post(
   },
   async (req, res) => {
     try {
-      const { swolegotchiName } = req.body;
+      const { swolegotchiName, description } = req.body;
       const inspirationImage = req.file;
-      console.log(`🎨 [${new Date().toISOString()}] Starting generation for "${swolegotchiName}" (Inspiration image: ${!!inspirationImage})`);
+      console.log(`🎨 [${new Date().toISOString()}] Starting generation for "${swolegotchiName}" (Description: ${!!description}, Inspiration image: ${!!inspirationImage})`);
       if (!swolegotchiName || !swolegotchiName.trim())
         return res.status(400).json({ error: 'Flexling name is required' });
-      if (!process.env.OPENAI_API_KEY)
-        return res.status(500).json({ error: 'OpenAI API key not configured' });
+      if (!process.env.GEMINI_API_KEY)
+        return res.status(500).json({ error: 'Gemini API key not configured' });
 
-      let prompt = `Create a cute, adorable 8-bit pixel art Pokemon-style character called "${swolegotchiName}" that is fitness and health themed. The character should be:
-- A classic Game Boy pixel art style with limited color palette (green, black, white, yellow)
-- Bright, vibrant colors typical of Pokemon characters
-- Strong and fitness-focused while maintaining an endearing, game-like appearance
-- Include fitness-related accessories or features (dumbbells, sweatbands, workout gear, muscle definition)
-- Large, expressive eyes typical of Pokemon
-- Suitable for a mobile fitness game character
-- 8-bit pixel art aesthetic, Game Boy inspired, Pokemon-like, cute but strong, fitness-themed
-- Square format, centered character design
-- Retro gaming sprite style with clear, bold pixel art lines`;
+      let prompt = `Create a cute, adorable 8-bit pixel art Pokemon-style character called "${swolegotchiName}" that is fitness and health themed. 
+      ${description ? `CHARACTER DESCRIPTION: ${description}\n` : ''}
+      The character sheet MUST show two views of the SAME character:
+      1. FRONT-FACING view (facing the viewer, for when it's an enemy or in profile)
+      2. BACK-FACING view (facing away from the viewer, for when the player uses it in battle)
+
+      The character should be:
+      - A classic Game Boy pixel art style with limited color palette (green, black, white, yellow)
+      - Bright, vibrant colors typical of Pokemon characters
+      - Strong and fitness-focused while maintaining an endearing, game-like appearance
+      - Include fitness-related accessories or features (dumbbells, sweatbands, workout gear, muscle definition)
+      - Large, expressive eyes typical of Pokemon
+      - Suitable for a mobile fitness game character
+      - 8-bit pixel art aesthetic, Game Boy inspired, Pokemon-like, cute but strong, fitness-themed
+      - Square format, centered character design
+      - Retro gaming sprite style with clear, bold pixel art lines.
+      
+      
+      IMPORTANT: Both views must be on a clean, solid white background for easy cropping. Place the Front view on the left and the Back view on the right. 
+      
+      Important: DO not include any test in the image such as the characters name or the text that says front & back.
+      `;
 
       if (inspirationImage) {
         if (inspirationImage.size === 0)
@@ -69,29 +82,14 @@ router.post(
         prompt += `\n\nINSPIRATION: Incorporate visual elements, colors, or characteristics from the user image while maintaining the 8-bit Pokemon fitness theme.`;
       }
 
-      let response;
+      let generatedImageBase64;
       if (inspirationImage) {
-        const file = new File([inspirationImage.buffer], 'inspiration.png', {
-          type: 'image/png',
-        });
-        response = await openai.images.edit({
-          model: 'gpt-image-1',
-          image: file,
-          prompt,
-          size: '1024x1024',
-        });
+        const base64Inspiration = inspirationImage.buffer.toString('base64');
+        generatedImageBase64 = await generateGeminiImage(prompt, base64Inspiration);
       } else {
-        response = await openai.images.generate({
-          model: 'gpt-image-1',
-          prompt,
-          size: '1024x1024',
-          quality: 'high',
-        });
+        generatedImageBase64 = await generateGeminiImage(prompt);
       }
 
-      if (!response.data || !response.data[0] || !response.data[0].b64_json)
-        throw new Error('No image data returned from OpenAI API');
-      const generatedImageBase64 = response.data[0].b64_json;
       const generatedImageUrl = `data:image/png;base64,${generatedImageBase64}`;
 
       console.log(`✅ [${new Date().toISOString()}] Flexling "${swolegotchiName}" generated successfully!`);
