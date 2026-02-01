@@ -85,7 +85,8 @@ router.post(
       let generatedImageBase64;
       if (inspirationImage) {
         const base64Inspiration = inspirationImage.buffer.toString('base64');
-        generatedImageBase64 = await generateGeminiImage(prompt, base64Inspiration);
+        const mimeType = inspirationImage.mimetype || 'image/jpeg';
+        generatedImageBase64 = await generateGeminiImage(prompt, base64Inspiration, mimeType);
       } else {
         generatedImageBase64 = await generateGeminiImage(prompt);
       }

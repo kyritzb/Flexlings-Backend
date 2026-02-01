@@ -4,9 +4,10 @@ const { env } = require('../config/env');
  * Generates an image using Gemini 3 Pro Image Preview (Nano Banana API)
  * @param {string} prompt - The prompt for image generation
  * @param {string|null} inspirationImageBase64 - Optional base64 encoded inspiration image
+ * @param {string} mimeType - The mime type of the inspiration image (default: 'image/jpeg')
  * @returns {Promise<string>} - Base64 encoded generated image
  */
-const generateGeminiImage = async (prompt, inspirationImageBase64 = null) => {
+const generateGeminiImage = async (prompt, inspirationImageBase64 = null, mimeType = 'image/jpeg') => {
   const apiKey = env.geminiApiKey;
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY is not configured');
@@ -20,7 +21,7 @@ const generateGeminiImage = async (prompt, inspirationImageBase64 = null) => {
   if (inspirationImageBase64) {
     parts.push({
       inline_data: {
-        mime_type: 'image/png',
+        mime_type: mimeType,
         data: inspirationImageBase64
       }
     });
