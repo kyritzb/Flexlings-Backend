@@ -13,6 +13,7 @@ const authRouter = require('./routes/auth');
 const terraRouter = require('./routes/terra');
 const checkinsRouter = require('./routes/checkins');
 const aiRouter = require('./routes/ai');
+const foodRouter = require('./routes/food');
 
 const app = express();
 
@@ -47,6 +48,7 @@ app.get('/auth/terra/initiate', (req, res) => {
 });
 app.use('/api', checkinsRouter);
 app.use('/api', aiRouter);
+app.use('/api', foodRouter);
 
 // Create HTTP server to share with WebSocket
 const server = http.createServer(app);
